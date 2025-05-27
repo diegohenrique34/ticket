@@ -1,0 +1,100 @@
+name: Deploy to ModernizeTech
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      subdomain:
+        description: 'Subdomain for deployment (e.g., cliente1.modernizetech.shop)'
+        required: true
+      db_host:
+        description: 'Database host'
+        required: true
+      db_database:
+        description: 'Database name'
+        required: true
+      db_username:
+        description: 'Database username'
+        required: true
+      db_password:
+        description: 'Database password'
+        required: true
+      repository_url:
+        description: 'Repository URL'
+        required: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+          extensions: mbstring, bcmath, pdo_mysql
+
+      - name: Install Composer dependencies
+        run: composer install --no-dev --optimize-autoloader
+
+      - name: Build assets
+        run: |
+          npm install
+          npm run build
+
+      - name: Deploy to CyberPanel
+        uses: appleboy/ssh-action@v0.1.6
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SERVER_SSH_KEY }}
+          port: 22
+          script: |
+            export TERM=xterm
+            project_path="/home/${{ github.event.inputs.subdomain || secrets.SUBDOMAIN }}/public_html"
+            cd $project_path
+            if [ -d ".git" ]; then
+              git pull origin main
+            else
+              git clone ${{ github.event.inputs.repository_url || secrets.REPOSITORY_URL }} .
+            fi
+            composer install --no-dev --optimize-autoloader
+            cp .env.example .env
+            echo "APP_NAME=Laravel" >> .env
+            echo "APP_ENV=production" >> .env
+            echo "APP_KEY=" >> .env
+            echo "APP_DEBUG=false" >> .env
+            echo "APP_URL=https://${{ github.event.inputs.subdomain || secrets.SUBDOMAIN }}" >> .env
+            echo "DB_CONNECTION=mysql" >> .env
+            echo "DB_HOST=${{ github.event.inputs.db_host || secrets.DB_HOST }}" >> .env
+            echo "DB_PORT=3306" >> .env
+            echo "DB_DATABASE=${{ github.event.inputs.db_database || secrets.DB_DATABASE }}" >> .env
+            echo "DB_USERNAME=${{ github.event.inputs.db_username || secrets.DB_USERNAME }}" >> .env
+            echo "DB_PASSWORD=${{ github.event.inputs.db_password || secrets.DB_PASSWORD }}" >> .env
+            echo "FILESYSTEM_DISK=public" >> .env
+            php artisan key:generate --force
+            php artisan migrate --force
+            php artisan db:seed --force
+            php artisan storage:link
+            chown -R ${{ github.event.inputs.subdomain || secrets.SUBDOMAIN }}:${{ github.event.inputs.subdomain || secrets.SUBDOMAIN }} .
+            chmod -R 755 storage
+            chmod -R 755 bootstrap/cache
+            chmod 600 .env
+            rm -f index.html
+
+      - name: Check if site is online
+        run: |
+          for i in {1..10}; do
+            if curl --fail -m 5 "https://${{ github.event.inputs.subdomain || secrets.SUBDOMAIN }}"; then
+              echo "Site is online!"
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "Site not online after 10 attempts"
+          exit 1
